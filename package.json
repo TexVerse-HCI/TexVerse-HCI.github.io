@@ -1,0 +1,28 @@
+{
+  "name": "webapp",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "watch": "webpack --watch",
+    "build": "webpack --mode production",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@pinecone-database/pinecone": "^2.0.1",
+    "d3": "^7.8.5",
+    "dotenv": "^16.4.5",
+    "firebase": "^10.8.0",
+    "firebaseui": "^6.1.0",
+    "openai": "^4.28.0",
+    "serve": "^14.2.1"
+  },
+  "devDependencies": {
+    "webpack": "^5.90.1",
+    "webpack-cli": "^5.1.4",
+    "webpack-dev-server": "^5.0.0"
+  }
+}
