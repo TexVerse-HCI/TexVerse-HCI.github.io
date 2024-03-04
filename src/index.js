@@ -700,8 +700,10 @@ async function loadCollectionsPapers() {
     collapseContentHTML += `
     <div id="${collapseId}" class="collapse" aria-labelledby="${cardId}" data-bs-parent="#${collapseId}-container">
         <div class="card card-body">
-          <p>Authors: ${paper.authors}</p>
-          <p>Abstract: ${paper.abstract_full}</p>
+          <p><strong>Authors</strong>: ${paper.authors}</p>
+          <p><strong>Link</strong>: <a href="${paper.doi}" target="_blank">${paper.doi}</a></p>
+          <p><strong>Conference</strong>: ${paper.conference} | ${paper.contentType}</p>
+          <p><strong>Abstract</strong>: ${paper.abstract_full}</p>
         </div>
     </div>
     `;
@@ -1054,8 +1056,10 @@ async function loadPapers(sortOption, filterOption, curretnFilter) {
     collapseContentHTML += `
     <div id="${collapseId}" class="collapse" aria-labelledby="${cardId}" data-bs-parent="#${collapseId}-container">
         <div class="card card-body">
-          <p>Authors: ${paper.authors}</p>
-          <p>Abstract: ${paper.abstract_full}</p>
+          <p><strong>Authors</strong>: ${paper.authors}</p>
+          <p><strong>Link</strong>: <a href="${paper.doi}" target="_blank">${paper.doi}</a></p>
+          <p><strong>Conference</strong>: ${paper.conference} | ${paper.contentType}</p>
+          <p><strong>Abstract</strong>: ${paper.abstract_full}</p>
         </div>
     </div>
 `;

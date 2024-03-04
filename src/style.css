@@ -368,7 +368,7 @@ a.sidebar-link:hover {
     display: inline-block;
     margin: 2px;
     padding: 5px 10px;
-    background-color: #007bff; /* 蓝色背景 */
+    background-color: #3e3e3e; /* 蓝色背景 */
     color: #ffffff; /* 白色文字 */
     border-radius: 20px; /* 圆角 */
     font-size: 12px; /* 字体大小 */
