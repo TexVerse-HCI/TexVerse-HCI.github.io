@@ -326,7 +326,7 @@ a.sidebar-link:hover {
     width: 60%;
     position: fixed;
     bottom: 0;
-    padding: 10px;
+    padding: 1.5rem;
 }
 .chatContainer {
     position: relative;
@@ -375,4 +375,56 @@ a.sidebar-link:hover {
   
   .keywords-container {
     margin-top: 10px;
+  }
+
+  .chat-bubble {
+    display: flex;
+    align-items: center; /* Align items vertically */
+    align-items: flex-start;
+    margin-bottom: 3rem;
+  }
+
+  .chat-bubble i {
+    font-size: 2rem; /* Or any size you prefer */
+    margin-right: .5rem;
+  }
+
+  .spinner-grow {
+    margin-right: 1rem;
+  }
+
+  .card-metadata {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-top: 1rem;
+    opacity: .4;
+  }
+
+  .card-metadata p {
+    margin-bottom: 0;
+  }
+
+  .card i {
+    font-size: 2rem;
+    background-color: #ffffff;
+    padding: 0.4rem;
+  }
+
+  .card {
+    position: relative;
+  }
+  
+  .card .lni-star-empty {
+    position: absolute;
+    top: 0; /* Adjust as needed */
+    right: 0; /* Adjust as needed */
+    z-index: 1; /* Ensures the icon appears above the image */
+  }
+
+  .card .lni-star-fill {
+    position: absolute;
+    top: 0; /* Adjust as needed */
+    right: 0; /* Adjust as needed */
+    z-index: 1; /* Ensures the icon appears above the image */
   }
