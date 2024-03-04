@@ -9,11 +9,6 @@
         "John Smith": 8,
         "Alice Johnson": 5
     },
-    "institutions": {
-        "University of California, Berkeley": 12,
-        "Stanford University": 8,
-        "University of California, Los Angeles": 5
-    },
     "date": {
         "2023": 12,
         "2022": 8,
@@ -49,11 +44,6 @@
         "1992": 1,
         "1991": 1,
         "1990": 1
-    },
-    "publication": {
-        "CHI": 12,
-        "UIST": 8,
-        "TEI": 5
     },
     "contentType": {
         "paper": 12,

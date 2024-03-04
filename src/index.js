@@ -1,38 +1,87 @@
 // Import the functions you need from the SDKs you need
 import { initializeApp } from "firebase/app";
 import { getAnalytics } from "firebase/analytics";
-import { getFirestore, collection, getDoc, getDocs, setDoc, doc, query, startAfter, limit } from "firebase/firestore";
+import { getFirestore, collection, getDoc, getDocs, setDoc, updateDoc, doc, query, orderBy, where, startAfter, limit } from "firebase/firestore";
 import { getStorage, ref, getDownloadURL } from "firebase/storage";
 import { getAuth, signInWithPopup, GoogleAuthProvider } from "firebase/auth";
 import * as d3 from "d3";
 import { Pinecone } from '@pinecone-database/pinecone';
 import OpenAI from 'openai';
+import './style.css';
+import marked from 'marked';
 
-var yearList; // global variable to store the year list
-// load sidebar data
-document.addEventListener('DOMContentLoaded', function () {
-  // use fetch to load the sidebar.json file ascynchronously
-  fetch('sidebar.json')
-    .then(response => response.json()) // parse the JSON from the server
-    .then(data => {
-      // update the sidebar with the data from the server
-      updateSidebar(data);
-    })
-    .catch(error => console.error('Error loading sidebar data:', error));
+import showdown from 'showdown';
 
-  // handle the sort dropdown
-  var dropdownItems = document.querySelectorAll('#sort-dropdown-menu .dropdown-item');
-  // Select the button with the ID 'sort-dropdown-toggle'
-  var dropdownButton = document.querySelector('#sort-dropdown-toggle');
+// Create a converter instance
+const converter = new showdown.Converter();
 
-  dropdownItems.forEach(function (item) {
-    item.addEventListener('click', function () {
-      // Update the button text to match the clicked item's text
-      dropdownButton.textContent = this.textContent;
-      // Optional: Close the dropdown menu if it's open. This step might need adjustments based on your implementation.
-    });
+// login status
+let loginStatus = false;
+let currentPage = "gallery"; // default page is collection
+let userID = null;
+let collectionList = []; // list of collections for the current user
+
+let lastVisible = null; // global variable to store the last visible document
+let isLoading = false; // track if it's loading
+let allDataLoaded = false; // track if all data is loaded
+let sortOption = "latest"; // default sort option
+let filterOption = { "keywords": [], "authors": [], "year": [], "contentType": [] }; // default filter option
+let curretnFilter = null; // current filter; users can apply only one filter at a time
+
+// navigation bar update based on the current page
+document.querySelectorAll('.nav-item .nav-link').forEach(link => {
+  link.addEventListener('click', function (event) {
+    event.preventDefault(); // Prevent the default anchor link behavior
+    const page = this.getAttribute('href').substring(1); // Remove '#' to get the page name
+    currentPage = page; // Set currentPage variable to the extracted page name
+    console.log(currentPage); // For testing purposes
+    if (currentPage == "gallery") {
+      document.querySelector('.sidebar-nav').style.display = 'block';
+      addClickToCollectionIcon();
+    }
+    else {
+      document.querySelector('.sidebar-nav').style.display = 'none';
+      // Clear existing papers
+      document.getElementById('collectionsContainer').innerHTML = '';
+      loadCollectionsPapers();
+    }
   });
 });
+
+// highlight the filter span (one time can only highlight one filter span)
+function highlightFilterSpan(spanId) {
+  const filterSpans = ['dateFilterSpan', 'keywordsFilterSpan', 'authorsFilterSpan', 'contentTypeFilterSpan'];
+
+  if (spanId == null) // no filter is selected
+  {
+    filterSpans.forEach(span => {
+      document.getElementById(span).style.fontWeight = 'normal';
+      document.getElementById(span).style.textDecoration = 'none';
+    });
+  }
+  else {
+    filterSpans.forEach(span => {
+      if (span === spanId) {
+        document.getElementById(span).style.fontWeight = 'bold';
+        document.getElementById(span).style.textDecoration = 'underline';
+      } else {
+        document.getElementById(span).style.fontWeight = 'normal';
+        document.getElementById(span).style.textDecoration = 'none';
+      }
+    });
+
+    if (spanId == 'dateFilterSpan') {
+      // 🛑🛑🛑🛑 firestore limitation, the order and filter must be on the same field
+      document.getElementById('citationOrder').classList.add('disabled');
+      document.getElementById('downloadOrder').classList.add('disabled');
+    }
+    else {
+      document.getElementById('citationOrder').classList.remove('disabled');
+      document.getElementById('downloadOrder').classList.remove('disabled');
+    }
+  }
+
+}
 
 // draw the date bar chart for sidebar
 function drawSideBarDateBarChart(dateData) {
@@ -155,6 +204,29 @@ function drawSideBarDateBarChart(dateData) {
     yearStart.text(yearList[startIndex]);
     yearEnd.text(yearList[endIndex - 1]);
 
+    // apply the filter
+    curretnFilter = "year";
+    filterOption.year = [yearList[startIndex], yearList[endIndex - 1]];
+
+    // 🌟 highlight the date filter span
+    highlightFilterSpan('dateFilterSpan');
+
+    // restart the load
+    // Clear existing papers
+    if (currentPage == "gallery") {
+      document.getElementById('papersContainer').innerHTML = '';
+    }
+    else if (currentPage == "collections") {
+      document.getElementById('collectionsContainer').innerHTML = '';
+    }
+    // Reset variables
+    lastVisible = null;
+    isLoading = false;
+    allDataLoaded = false;
+    // Reload papers based on the selected sort option
+    loadPapers(sortOption, filterOption, curretnFilter).catch(console.error);
+
+
     // update text opacity
     if (startIndex == endIndex) {
       yearStart.style("opacity", 0);
@@ -247,7 +319,7 @@ function drawSideBarDateBarChart(dateData) {
 // update the sidebar with the data from the server
 function updateSidebar(sidebarData) {
   // Add the sidebar dropdowns
-  let sidebarList = ["keywords", "authors", "institutions", "publication", "contentType"];
+  let sidebarList = ["keywords", "authors", "contentType"];
   sidebarList.forEach(function (item) {
     var sidebarItem = document.querySelector(`[data-bs-target="#${item}"]`);
     var newList = document.createElement('ul');
@@ -272,16 +344,8 @@ function updateSidebar(sidebarData) {
     drawSideBarDateBarChart(sidebarData.date);
     yearList = Object.keys(sidebarData.date);
     // console.log(yearList);
-  }
 
-  // color for the tags
-  const colors = {
-    "authors": "#9961e1",
-    "keywords": "#93c6ff",
-    "institutions": "#4494c4",
-    "publication": "#89e5c3",
-    "contentType": "#56baf6"
-  };
+  }
 
   // Add tag, remove tag and toggle tag selection logic
   document.querySelectorAll('.sidebar-tag').forEach(item => {
@@ -295,33 +359,67 @@ function updateSidebar(sidebarData) {
 
       if (this.classList.contains('sidebar-tag-selected')) {
         const category = this.parentNode.parentNode.id;
-        const color = colors[category] || '#000000'; // Default color if category not found
 
-        const tag = document.createElement('span');
-        tag.textContent = tagName;
-        tag.style.backgroundColor = color;
-        tag.className = `dynamic-tag dynamic-tag-name-${tagName.replace(/\s+/g, "-")}`;
+        // 🌟 highlight the filter span
+        highlightFilterSpan(`${category}FilterSpan`);
+        curretnFilter = category;
 
-        const removeBtn = document.createElement('span');
-        removeBtn.textContent = ' x';
-        removeBtn.style.cursor = 'pointer';
-        removeBtn.onclick = function () {
-          this.parentNode.remove();
-          const sidebarTag = document.querySelector(`.tag-name-${tagName.replace(/\s+/g, "-")}`);
-          if (sidebarTag) {
-            sidebarTag.classList.toggle('sidebar-tag-selected');
-            sidebarTag.classList.toggle('sidebar-link');
-          }
-        };
-        tag.appendChild(removeBtn);
-
-        document.getElementById('tags-container').appendChild(tag);
-      } else {
-        // Remove tag logic
-        const existingTag = document.querySelector(`#tags-container .dynamic-tag-name-${tagName.replace(/\s+/g, "-")}`);
-        if (existingTag) {
-          existingTag.remove();
+        // Add tag to filterOption
+        if (!(tagName in filterOption[category])) {
+          filterOption[category].push(tagName);
         }
+
+        // restart the load
+        // Clear existing papers
+        if (currentPage == "gallery") {
+          document.getElementById('papersContainer').innerHTML = '';
+        }
+        else if (currentPage == "collections") {
+          document.getElementById('collectionsContainer').innerHTML = '';
+        }
+
+        // Reset variables
+        lastVisible = null;
+        isLoading = false;
+        allDataLoaded = false;
+        // Reload papers based on the selected sort option
+        loadPapers(sortOption, filterOption, curretnFilter).catch(console.error);
+
+        console.log(filterOption);
+
+      } else {
+        const category = this.parentNode.parentNode.id;
+        filterOption[category] = filterOption[category].filter(item => item !== tagName);
+
+        // 🌟 highlight the filter span
+        if (filterOption[category].length != 0) // if there are still tags selected
+        {
+          highlightFilterSpan(`${category}FilterSpan`);
+          curretnFilter = category;
+        }
+        else // if no tags are selected
+        {
+          highlightFilterSpan(null);
+          curretnFilter = null;
+        }
+
+        // restart the load
+        // Clear existing papers
+        if (currentPage == "gallery") {
+          document.getElementById('papersContainer').innerHTML = '';
+        }
+        else if (currentPage == "collections") {
+          document.getElementById('collectionsContainer').innerHTML = '';
+        }
+
+        // Reset variables
+        lastVisible = null;
+        isLoading = false;
+        allDataLoaded = false;
+        // Reload papers based on the selected sort option
+        loadPapers(sortOption, filterOption, curretnFilter).catch(console.error);
+
+        console.log(filterOption);
       }
     });
   });
@@ -351,22 +449,441 @@ const analytics = getAnalytics(app);
 const db = getFirestore(app);   // Get a reference to the database service
 const storage = getStorage(app); // Get a reference to the storage service
 
-let lastVisible = null; // global variable to store the last visible document
-let isLoading = false; // track if it's loading
-let allDataLoaded = false; // track if all data is loaded
+var yearList; // global variable to store the year list
+// load sidebar data, based on realtime data from the firebase database
+document.addEventListener('DOMContentLoaded', function () {
+  let paperQuery;
+  paperQuery = query(collection(db, 'paper'));
+  async function fetchData() {
+    let paperQuery;
+    paperQuery = query(collection(db, 'paper'));
+    const querySnapshot = await getDocs(paperQuery);
+
+    // find top 5 most frequent keywords
+    const keywordsCount = {};
+    querySnapshot.forEach(doc => {
+      const paper = doc.data();
+      if (paper.keywords) {
+        paper.keywords.forEach(keyword => {
+          if (keywordsCount[keyword]) {
+            keywordsCount[keyword] += 1;
+          } else {
+            keywordsCount[keyword] = 1;
+          }
+        });
+      }
+    });
+    // Sort keywords by count and select the top 10
+    let top5Keywords = Object.entries(keywordsCount)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 10)
+      .reduce((obj, [key, value]) => {
+        obj[key] = value;
+        return obj;
+      }, {});
+
+    // find top 5 most frequent authors
+    const authorsCount = {};
+    querySnapshot.forEach(doc => {
+      const paper = doc.data();
+      if (paper.authors) {
+        paper.authors.forEach(author => {
+          if (authorsCount[author]) {
+            authorsCount[author] += 1;
+          } else {
+            authorsCount[author] = 1;
+          }
+        });
+      }
+    });
+    // Sort authors by count and select the top 5
+    let top5Authors = Object.entries(authorsCount)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 5)
+      .reduce((obj, [key, value]) => {
+        obj[key] = value;
+        return obj;
+      }, {});
+
+    // find the top 5 most frequent content types
+    const contentTypeCount = {};
+    querySnapshot.forEach(doc => {
+      const paper = doc.data();
+      if (paper.contentType) {
+        if (contentTypeCount[paper.contentType]) {
+          contentTypeCount[paper.contentType] += 1;
+        } else {
+          contentTypeCount[paper.contentType] = 1;
+        }
+      }
+    });
+    let top5ContentType = Object.entries(contentTypeCount)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 5)
+      .reduce((obj, [key, value]) => {
+        obj[key] = value;
+        return obj;
+      }, {});
+
+    let sidebarData = { "keywords": top5Keywords, "authors": top5Authors, "contentType": top5ContentType, "date": {} };
+
+    // find the number of papers for each year
+    querySnapshot.forEach(doc => {
+      const paper = doc.data();
+      if (paper.year) {
+        if (sidebarData.date[paper.year]) {
+          sidebarData.date[paper.year] += 1;
+        } else {
+          sidebarData.date[paper.year] = 1;
+        }
+      }
+    });
+
+    updateSidebar(sidebarData);
+
+    // use fetch to load the sidebar.json file ascynchronously
+    // fetch('sidebar.json')
+    //   .then(response => response.json()) // parse the JSON from the server
+    //   .then(data => {
+    //     // update the sidebar with the data from the server
+    //     updateSidebar(data);
+    //   })
+    //   .catch(error => console.error('Error loading sidebar data:', error));
+
+    // handle the sort dropdown
+    var dropdownItems = document.querySelectorAll('#sort-dropdown-menu .dropdown-item');
+    // Select the button with the ID 'sort-dropdown-toggle'
+    var dropdownButton = document.querySelector('#sort-dropdown-toggle');
+
+    dropdownItems.forEach(function (item) {
+      item.addEventListener('click', function () {
+        // Update the button text to match the clicked item's text
+        dropdownButton.textContent = this.textContent;
+        // Optional: Close the dropdown menu if it's open. This step might need adjustments based on your implementation.
+      });
+    });
+
+    var dropdownButton = document.querySelector('#sort-dropdown-toggle');
+
+    dropdownItems.forEach(function (item) {
+      item.addEventListener('click', function () {
+        // Update the button text to match the clicked item's text
+        dropdownButton.textContent = this.textContent;
+        // Optional: Close the dropdown menu if it's open. This step might need adjustments based on your implementation.
+      });
+    });
+  }
+
+  fetchData();
+});
+
+
+document.querySelectorAll('#sort-dropdown-menu .dropdown-item').forEach(item => {
+  item.addEventListener('click', function () {
+    // Get sort option from the clicked item
+    sortOption = this.textContent;
+
+    // Clear existing papers
+    if (currentPage == "gallery") {
+      document.getElementById('papersContainer').innerHTML = '';
+    }
+    else if (currentPage == "collections") {
+      document.getElementById('collectionsContainer').innerHTML = '';
+    }
+
+    // Reset variables
+    lastVisible = null;
+    isLoading = false;
+    allDataLoaded = false;
+
+    // Update the sort button text
+    document.getElementById('sort-dropdown-toggle').textContent = sortOption;
+
+    // Reload papers based on the selected sort option
+    loadPapers(sortOption, filterOption, curretnFilter).catch(console.error);
+  });
+});
+
+// load collections papers
+async function loadCollectionsPapers() {
+  let paperQuery = query(collection(db, 'paper'), where("docId", "in", collectionList));
+  const querySnapshot = await getDocs(paperQuery);
+  querySnapshot.forEach((doc) => {
+    const paper = doc.data();
+    console.log(paper);
+  });
+
+
+  // append the cards to the page, use bs5 grid system
+  let row; // track the current row of cards
+  let counter = 0; // track the number of cards in the current row
+  let collapseContentHTML = ""; // track the collapse content
+  let index = 0;
+
+  const imgPromises = [];
+  const papersData = [];
+
+  querySnapshot.forEach((doc) => {
+    const paper = doc.data();
+    const imgFileName = paper.doi.split('/').pop() + ".png";
+    const imgRef = ref(storage, `${imgFileName}`);
+
+    // Store paper data and prepare image URL fetch promise
+    papersData.push({ paper, cardId: `card-${doc.id}`, collapseId: `collapse-${doc.id}` });
+    imgPromises.push(getDownloadURL(imgRef).catch(() => null)); // Catch to ensure Promise.all resolves
+  });
+
+  const imgUrls = await Promise.all(imgPromises);
+
+  // Now, with all URLs resolved, load cards in order
+  querySnapshot.forEach((doc) => {
+    const paper = doc.data();
+    const cardId = `card-${doc.id}`;
+    const collapseId = `collapse-${doc.id}`;
+    loadCards(paper, cardId, collapseId, imgUrls[index]);
+    index++;
+  });
+
+  isLoading = false; // after loading, set the loading flag to false
+
+  function loadCards(paper, cardId, collapseId, url) {
+    let cardHTML;
+    // convert the keywords to HTML
+    const keywordsHTML = paper.keywords.map(keyword =>
+      `<span class="cardTag">${keyword}</span>`
+    ).join('');
+    let paperDocId = cardId.split('-')[1]; // get the paper document id (in the firebase database)
+
+    // if the paper has an image, use the card with image
+    if (url) {
+      cardHTML = `
+          <div class="col-md-4">
+            <div class="card" id="${cardId}" data-bs-toggle="collapse" data-bs-target="#${collapseId}" aria-expanded="false" aria-controls="${collapseId}">
+              <img src="${url}" class="card-img-top" alt="...">
+              <div class="card-body">
+                <h5 class="card-title">${paper.title}</h5>  
+                <p class="card-text">${paper.abstract}</p>
+                <div class="card-metadata">
+                  <p class="card-text">${paper.year}</p>
+                  <p class="card-text">cited by: ${paper.citation_num}</p>
+                  <p class="card-text">download: ${paper.download_num}</p>
+                </div>
+                <i class="lni lni-star-fill"></i>
+                <div class="keywords-container">${keywordsHTML}</div>
+              </div>
+            </div>
+          </div>
+        `;
+    } else {
+      cardHTML = `
+        <div class="col-md-4">
+          <div class="card" id="${cardId}" data-bs-toggle="collapse" data-bs-target="#${collapseId}" aria-expanded="false" aria-controls="${collapseId}">
+            <div class="card-body">
+              <h5 class="card-title">${paper.title}</h5>
+              <p class="card-text">${paper.abstract}</p>
+
+              <div class="card-metadata">
+                <p class="card-text">${paper.year}</p>
+                <p class="card-text">cited by: ${paper.citation_num}</p>
+                <p class="card-text">download: ${paper.download_num}</p>
+              </div>
+
+              <i class="lni lni-star-fill"></i>
+
+              <div class="keywords-container">${keywordsHTML}</div>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+    // add collapse content
+    collapseContentHTML += `
+    <div id="${collapseId}" class="collapse" aria-labelledby="${cardId}" data-bs-parent="#${collapseId}-container">
+        <div class="card card-body">
+          <p>Authors: ${paper.authors}</p>
+          <p>Abstract: ${paper.abstract_full}</p>
+        </div>
+    </div>
+    `;
+
+    if (counter == 0) {
+      row = document.createElement('div');
+      row.className = 'row';
+      collectionsContainer.appendChild(row);
+    }
+    else if (counter % 3 === 0 && index != 0) { // every 3 cards, create a new row
+
+
+      row = document.createElement('div');
+      row.className = 'row';
+      collectionsContainer.appendChild(row);
+    }
+
+    // add collapse content
+    if (counter != 0 && counter % 3 === 2 || index === querySnapshot.docs.length - 1) {
+      const collapseContainer = document.createElement('div');
+      collapseContainer.id = `${collapseId}-container`;
+      collectionsContainer.appendChild(collapseContainer);
+
+      collapseContainer.innerHTML = collapseContentHTML;
+      collapseContentHTML = ""; // clear the collapseContentHTML
+    }
+
+    row.innerHTML += cardHTML; // add the card to the row
+    counter++; // increment the counter
+  }
+
+  // add click event to the collection icon, since new cards are loaded
+  addClickToCollectionIcon();
+}
 
 // read the papers from the database and load them as cards
-async function loadPapers() {
+async function loadPapers(sortOption, filterOption, curretnFilter) {
   if (isLoading || allDataLoaded) return; // avoid loading at the same time
   isLoading = true;
-  // console.log('Loading more papers...');
+  // console  .log('Loading more papers...');
 
   // get papers from collection
   let paperQuery;
-  if (lastVisible) {
-    paperQuery = query(collection(db, 'paper'), startAfter(lastVisible), limit(18));
-  } else {
-    paperQuery = query(collection(db, 'paper'), limit(18));
+  if (sortOption == "latest") {
+    if (lastVisible)  // if not the first 18 load
+    {
+      if (!curretnFilter) {
+        paperQuery = query(collection(db, 'paper'), orderBy("year", "desc"), startAfter(lastVisible), limit(18));
+      }
+      else if (curretnFilter == "year") {
+        paperQuery = query(collection(db, 'paper'), orderBy("year", "desc"), where("year", ">=", Number(filterOption.year[0])), where("year", "<=", Number(filterOption.year[1])), startAfter(lastVisible), limit(18));
+      }
+      else if (curretnFilter == "keywords") {
+        paperQuery = query(collection(db, 'paper'), orderBy("year", "desc"), where("keywords", "array-contains-any", filterOption.keywords), startAfter(lastVisible), limit(18));
+      }
+      else if (curretnFilter == "authors") {
+        paperQuery = query(collection(db, 'paper'), orderBy("year", "desc"), where("authors", "array-contains-any", filterOption.authors), startAfter(lastVisible), limit(18));
+      }
+      else if (curretnFilter == "contentType") {
+        paperQuery = query(collection(db, 'paper'), orderBy("year", "desc"), where("contentType", "in", filterOption.contentType), startAfter(lastVisible), limit(18));
+      }
+    }
+    else  // if the first 18 load
+    {
+      if (!curretnFilter) {
+        paperQuery = query(collection(db, 'paper'), orderBy("year", "desc"), limit(18));
+      }
+      else if (curretnFilter == "year") {
+        paperQuery = query(collection(db, 'paper'), orderBy("year", "desc"), where("year", ">=", Number(filterOption.year[0])), where("year", "<=", Number(filterOption.year[1])), limit(18));
+      }
+      else if (curretnFilter == "keywords") {
+        paperQuery = query(collection(db, 'paper'), orderBy("year", "desc"), where("keywords", "array-contains-any", filterOption.keywords), limit(18));
+      }
+      else if (curretnFilter == "authors") {
+        paperQuery = query(collection(db, 'paper'), orderBy("year", "desc"), where("authors", "array-contains-any", filterOption.authors), limit(18));
+      }
+      else if (curretnFilter == "contentType") {
+        paperQuery = query(collection(db, 'paper'), orderBy("year", "desc"), where("contentType", "in", filterOption.contentType), limit(18));
+      }
+    }
+  }
+  else if (sortOption == "earliest") {
+    if (lastVisible) // if not the first 18 load
+    {
+      if (!curretnFilter) {
+        paperQuery = query(collection(db, 'paper'), orderBy("year", "asc"), startAfter(lastVisible), limit(18));
+      }
+      else if (curretnFilter == "year") {
+        paperQuery = query(collection(db, 'paper'), orderBy("year", "asc"), where("year", ">=", Number(filterOption.year[0])), where("year", "<=", Number(filterOption.year[1])), startAfter(lastVisible), limit(18));
+      }
+      else if (curretnFilter == "keywords") {
+        paperQuery = query(collection(db, 'paper'), orderBy("year", "asc"), where("keywords", "array-contains-any", filterOption.keywords), startAfter(lastVisible), limit(18));
+      }
+      else if (curretnFilter == "authors") {
+        paperQuery = query(collection(db, 'paper'), orderBy("year", "asc"), where("authors", "array-contains-any", filterOption.authors), startAfter(lastVisible), limit(18));
+      }
+      else if (curretnFilter == "contentType") {
+        paperQuery = query(collection(db, 'paper'), orderBy("year", "asc"), where("contentType", "in", filterOption.contentType), startAfter(lastVisible), limit(18));
+      }
+    }
+    else // if the first 18 load
+    {
+      if (!curretnFilter) {
+        paperQuery = query(collection(db, 'paper'), orderBy("year", "asc"), where("year", ">=", 2023), where("year", "<=", 2024), limit(18));
+      }
+      else if (curretnFilter == "year") {
+        paperQuery = query(collection(db, 'paper'), orderBy("year", "asc"), where("year", ">=", Number(filterOption.year[0])), where("year", "<=", Number(filterOption.year[1])), limit(18));
+      }
+      else if (curretnFilter == "keywords") {
+        paperQuery = query(collection(db, 'paper'), orderBy("year", "asc"), where("keywords", "array-contains-any", filterOption.keywords), limit(18));
+      }
+      else if (curretnFilter == "authors") {
+        paperQuery = query(collection(db, 'paper'), orderBy("year", "asc"), where("authors", "array-contains-any", filterOption.authors), limit(18));
+      }
+      else if (curretnFilter == "contentType") {
+        paperQuery = query(collection(db, 'paper'), orderBy("year", "asc"), where("contentType", "in", filterOption.contentType), limit(18));
+      }
+    }
+  }
+  else if (sortOption == "citation") {
+    if (lastVisible) // if not the first 18 load
+    {
+      if (!curretnFilter) {
+        paperQuery = query(collection(db, 'paper'), orderBy("citation_num", "desc"), startAfter(lastVisible), limit(18));
+      }
+      else if (curretnFilter == "keywords") {
+        paperQuery = query(collection(db, 'paper'), orderBy("citation_num", "desc"), where("keywords", "array-contains-any", filterOption.keywords), startAfter(lastVisible), limit(18));
+      }
+      else if (curretnFilter == "authors") (
+        paperQuery = query(collection(db, 'paper'), orderBy("citation_num", "desc"), where("authors", "array-contains-any", filterOption.authors), startAfter(lastVisible), limit(18))
+      )
+      else if (curretnFilter == "contentType") {
+        paperQuery = query(collection(db, 'paper'), orderBy("citation_num", "desc"), where("contentType", "in", filterOption.contentType), startAfter(lastVisible), limit(18));
+      }
+    }
+    else // if the first 18 load
+    {
+      if (!curretnFilter) {
+        paperQuery = query(collection(db, 'paper'), orderBy("citation_num", "desc"), limit(18));
+      }
+      else if (curretnFilter == "keywords") {
+        paperQuery = query(collection(db, 'paper'), orderBy("citation_num", "desc"), where("keywords", "array-contains-any", filterOption.keywords), limit(18));
+      }
+      else if (curretnFilter == "authors") {
+        paperQuery = query(collection(db, 'paper'), orderBy("citation_num", "desc"), where("authors", "array-contains-any", filterOption.authors), limit(18));
+      }
+      else if (curretnFilter == "contentType") {
+        paperQuery = query(collection(db, 'paper'), orderBy("citation_num", "desc"), where("contentType", "in", filterOption.contentType), limit(18));
+      }
+    }
+  }
+  else if (sortOption == "downloaded") {
+    if (lastVisible) // if not the first 18 load
+    {
+      if (!curretnFilter) {
+        paperQuery = query(collection(db, 'paper'), orderBy("download_num", "desc"), startAfter(lastVisible), limit(18));
+      }
+      else if (curretnFilter == "keywords") {
+        paperQuery = query(collection(db, 'paper'), orderBy("download_num", "desc"), where("keywords", "array-contains-any", filterOption.keywords), startAfter(lastVisible), limit(18));
+      }
+      else if (curretnFilter == "authors") (
+        paperQuery = query(collection(db, 'paper'), orderBy("download_num", "desc"), where("authors", "array-contains-any", filterOption.authors), startAfter(lastVisible), limit(18))
+      )
+      else if (curretnFilter == "contentType") {
+        paperQuery = query(collection(db, 'paper'), orderBy("download_num", "desc"), where("contentType", "in", filterOption.contentType), startAfter(lastVisible), limit(18));
+      }
+    }
+    else // if the first 18 load
+    {
+      if (!curretnFilter) {
+        paperQuery = query(collection(db, 'paper'), orderBy("download_num", "desc"), limit(18));
+      }
+      else if (curretnFilter == "keywords") {
+        paperQuery = query(collection(db, 'paper'), orderBy("download_num", "desc"), where("keywords", "array-contains-any", filterOption.keywords), limit(18));
+      }
+      else if (curretnFilter == "authors") {
+        paperQuery = query(collection(db, 'paper'), orderBy("download_num", "desc"), where("authors", "array-contains-any", filterOption.authors), limit(18));
+      }
+      else if (curretnFilter == "contentType") {
+        paperQuery = query(collection(db, 'paper'), orderBy("download_num", "desc"), where("contentType", "in", filterOption.contentType), limit(18));
+      }
+    }
   }
 
   const querySnapshot = await getDocs(paperQuery);
@@ -382,22 +899,30 @@ async function loadPapers() {
   // append the cards to the page, use bs5 grid system
   let row; // track the current row of cards
   let counter = 0; // track the number of cards in the current row
-  let collapseContentHTML = ""; // 用于累积当前row的所有collapse内容
+  let collapseContentHTML = ""; // track the collapse content
   let index = 0;
 
+  const imgPromises = [];
+  const papersData = [];
+
+  querySnapshot.forEach((doc) => {
+    const paper = doc.data();
+    const imgFileName = paper.doi.split('/').pop() + ".png";
+    const imgRef = ref(storage, `${imgFileName}`);
+
+    // Store paper data and prepare image URL fetch promise
+    papersData.push({ paper, cardId: `card-${doc.id}`, collapseId: `collapse-${doc.id}` });
+    imgPromises.push(getDownloadURL(imgRef).catch(() => null)); // Catch to ensure Promise.all resolves
+  });
+
+  const imgUrls = await Promise.all(imgPromises);
+
+  // Now, with all URLs resolved, load cards in order
   querySnapshot.forEach((doc) => {
     const paper = doc.data();
     const cardId = `card-${doc.id}`;
     const collapseId = `collapse-${doc.id}`;
-
-    const imgFileName = paper.doi.split('/').pop() + ".png";
-    const imgRef = ref(storage, `${imgFileName}`);
-
-    getDownloadURL(imgRef).then((url) => {
-      loadCards(paper, cardId, collapseId, url);
-    }).catch((error) => {
-      loadCards(paper, cardId, collapseId, null);
-    });
+    loadCards(paper, cardId, collapseId, imgUrls[index]);
     index++;
   });
 
@@ -405,46 +930,132 @@ async function loadPapers() {
 
   function loadCards(paper, cardId, collapseId, url) {
     let cardHTML;
-    // 转换关键词列表为HTML标签字符串
+    // convert the keywords to HTML
     const keywordsHTML = paper.keywords.map(keyword =>
       `<span class="cardTag">${keyword}</span>`
     ).join('');
+    let paperDocId = cardId.split('-')[1]; // get the paper document id (in the firebase database)
 
     // if the paper has an image, use the card with image
     if (url) {
-      cardHTML = `
+      if (loginStatus) {
+        if (collectionList.includes(paperDocId)) // if the paper is in the collection, add the filled star icon
+        {
+          cardHTML = `
+          <div class="col-md-4">
+            <div class="card" id="${cardId}" data-bs-toggle="collapse" data-bs-target="#${collapseId}" aria-expanded="false" aria-controls="${collapseId}">
+              <img src="${url}" class="card-img-top" alt="...">
+              <div class="card-body">
+                <h5 class="card-title">${paper.title}</h5>  
+                <p class="card-text">${paper.abstract}</p>
+                <div class="card-metadata">
+                  <p class="card-text">${paper.year}</p>
+                  <p class="card-text">cited by: ${paper.citation_num}</p>
+                  <p class="card-text">download: ${paper.download_num}</p>
+                </div>
+                <i class="lni lni-star-fill"></i>
+                <div class="keywords-container">${keywordsHTML}</div>
+              </div>
+            </div>
+          </div>
+        `;
+        }
+        else // if the paper is not in the collection, add the empty star icon
+        {
+          cardHTML = `
+          <div class="col-md-4">
+            <div class="card" id="${cardId}" data-bs-toggle="collapse" data-bs-target="#${collapseId}" aria-expanded="false" aria-controls="${collapseId}">
+              <img src="${url}" class="card-img-top" alt="...">
+              <div class="card-body">
+                <h5 class="card-title">${paper.title}</h5>  
+                <p class="card-text">${paper.abstract}</p>
+                <div class="card-metadata">
+                  <p class="card-text">${paper.year}</p>
+                  <p class="card-text">cited by: ${paper.citation_num}</p>
+                  <p class="card-text">download: ${paper.download_num}</p>
+                </div>
+                <i class="lni lni-star-empty"></i>
+                <div class="keywords-container">${keywordsHTML}</div>
+              </div>
+            </div>
+          </div>
+        `;
+        }
+
+      }
+      else {
+        cardHTML = `
         <div class="col-md-4">
           <div class="card" id="${cardId}" data-bs-toggle="collapse" data-bs-target="#${collapseId}" aria-expanded="false" aria-controls="${collapseId}">
             <img src="${url}" class="card-img-top" alt="...">
             <div class="card-body">
-              <h5 class="card-title">${paper.title}</h5>
+              <h5 class="card-title">${paper.title}</h5>  
               <p class="card-text">${paper.abstract}</p>
+              <div class="card-metadata">
+                <p class="card-text">${paper.year}</p>
+                <p class="card-text">cited by: ${paper.citation_num}</p>
+                <p class="card-text">download: ${paper.download_num}</p>
+              </div>
+
               <div class="keywords-container">${keywordsHTML}</div>
             </div>
           </div>
         </div>
       `;
+      }
+
+
     } else {
-      cardHTML = `
+      if (loginStatus) {
+        cardHTML = `
         <div class="col-md-4">
           <div class="card" id="${cardId}" data-bs-toggle="collapse" data-bs-target="#${collapseId}" aria-expanded="false" aria-controls="${collapseId}">
             <div class="card-body">
               <h5 class="card-title">${paper.title}</h5>
               <p class="card-text">${paper.abstract}</p>
+
+              <div class="card-metadata">
+                <p class="card-text">${paper.year}</p>
+                <p class="card-text">cited by: ${paper.citation_num}</p>
+                <p class="card-text">download: ${paper.download_num}</p>
+              </div>
+
+              <i class="lni lni-star-empty"></i>
+
               <div class="keywords-container">${keywordsHTML}</div>
             </div>
           </div>
         </div>
       `;
+      }
+      else {
+        cardHTML = `
+        <div class="col-md-4">
+          <div class="card" id="${cardId}" data-bs-toggle="collapse" data-bs-target="#${collapseId}" aria-expanded="false" aria-controls="${collapseId}">
+            <div class="card-body">
+              <h5 class="card-title">${paper.title}</h5>
+              <p class="card-text">${paper.abstract}</p>
+
+              <div class="card-metadata">
+                <p class="card-text">${paper.year}</p>
+                <p class="card-text">cited by: ${paper.citation_num}</p>
+                <p class="card-text">download: ${paper.download_num}</p>
+              </div>
+
+              <div class="keywords-container">${keywordsHTML}</div>
+            </div>
+          </div>
+        </div>
+      `;
+      }
+
     }
-    // 累积collapseHTML内容
+    // add collapse content
     collapseContentHTML += `
     <div id="${collapseId}" class="collapse" aria-labelledby="${cardId}" data-bs-parent="#${collapseId}-container">
         <div class="card card-body">
-            <p>Title: ${paper.title}</p>
-            <p>Full Abstract: ${paper.abstract_full}</p>
-            <p>Cited Number: ${paper.citation_num}</p>
-            <p>Download Number: ${paper.download_num}</p>
+          <p>Authors: ${paper.authors}</p>
+          <p>Abstract: ${paper.abstract_full}</p>
         </div>
     </div>
 `;
@@ -452,36 +1063,49 @@ async function loadPapers() {
     if (counter == 0) {
       row = document.createElement('div');
       row.className = 'row';
-      papersContainer.appendChild(row);
+      if (currentPage == "gallery") {
+        papersContainer.appendChild(row);
+      }
+      else if (currentPage == "collections") {
+        collectionsContainer.appendChild(row);
+      }
     }
-    else if (counter % 3 === 0 && index != 0) { // 每三个卡片开始新的一行，除了第一行
+    else if (counter % 3 === 0 && index != 0) { // every 3 cards, create a new row
 
 
       row = document.createElement('div');
       row.className = 'row';
-      papersContainer.appendChild(row);
+      if (currentPage == "gallery") {
+        papersContainer.appendChild(row);
+      }
+      else if (currentPage == "collections") {
+        collectionsContainer.appendChild(row);
+      }
     }
 
     // add collapse content
     if (counter != 0 && counter % 3 === 2 || index === querySnapshot.docs.length - 1) {
       const collapseContainer = document.createElement('div');
       collapseContainer.id = `${collapseId}-container`;
-      papersContainer.appendChild(collapseContainer);
+      if (currentPage == "gallery") {
+        papersContainer.appendChild(collapseContainer);
+      }
+      else if (currentPage == "collections") {
+        collectionsContainer.appendChild(collapseContainer);
+      }
       collapseContainer.innerHTML = collapseContentHTML;
       collapseContentHTML = ""; // clear the collapseContentHTML
     }
 
-
-
-    row.innerHTML += cardHTML; // 将卡片添加到当前行
-    counter++; // 更新卡片计数器
+    row.innerHTML += cardHTML; // add the card to the row
+    counter++; // increment the counter
   }
+  addClickToCollectionIcon(); // add click event to the collection icon (since there are new cards added)
 
 }
 
-
 // initial load; load the first 18 papers
-loadPapers().catch(console.error);
+loadPapers(sortOption, filterOption, curretnFilter).catch(console.error);
 
 function showSpinner() {
   document.getElementById('spinnerContainer').style.display = 'block';
@@ -492,26 +1116,113 @@ function hideSpinner() {
 }
 
 function checkScrollBottom() {
+  const isActive = document.querySelector('.nav.nav-underline .nav-item a[href="#gallery"]').classList.contains('active');
+
   // check if the user has scrolled to the bottom of the page
-  if (Math.abs(window.innerHeight + window.scrollY - document.body.offsetHeight) < 1 && !isLoading && !allDataLoaded) {
-    showSpinner(); // 显示加载中的spinner
+  if (isActive && Math.abs(window.innerHeight + window.scrollY - document.body.offsetHeight) < 1 && !isLoading && !allDataLoaded) {
+    showSpinner(); // show spinner when loading
     setTimeout(() => {
       console.log('call loadPapers()...');
-      loadPapers().then(() => {
-        hideSpinner(); // 加载完成后隐藏spinner
+      loadPapers(sortOption, filterOption, curretnFilter).then(() => {
+        hideSpinner(); // after loading, hide the spinner
       });
-    }, 1000); // 延迟1秒显示加载效果
+    }, 1000); // delay 1 second to show the spinner
   }
 }
 
-// 添加滚动事件监听器
+// add event listener to the window object
 window.addEventListener('scroll', checkScrollBottom);
 
 
-// handle the google sign in
-// login button
-let openai;
+// after login, the user can add collections: load the 🌟 icons for the collecting
+function addCollectionIcon() {
+  document.querySelectorAll('.col-md-4 .card').forEach(card => {
+    const icon = document.createElement('i');
+    icon.className = 'lni lni-star-empty';
+    card.appendChild(icon);
+  });
+}
 
+// after loading some paper, then the user login, the paper cards icon should be updated
+function changeToFillStar() {
+  console.log("list" + collectionList);
+
+}
+
+// add click event to the collection icon
+function addClickToCollectionIcon() {
+  document.querySelectorAll('.card .lni-star-empty, .card .lni-star-fill').forEach(icon => {
+    icon.addEventListener('click', function () {
+      // read icon class name
+      if (this.className == 'lni lni-star-fill') {
+        this.className = 'lni lni-star-empty';
+        const cardId = this.closest('.card').id.split('-')[1];
+        const userDocRef = doc(db, 'users', userID);
+        getDoc(userDocRef).then(docSnap => {
+          if (docSnap.exists()) {
+            // If the document exists, update or set the collection field
+            let collections = docSnap.data().collections || [];
+            if (collections.includes(cardId)) {
+              collections = collections.filter(id => id !== cardId);
+              updateDoc(userDocRef, { collections: collections });
+            }
+            collectionList = collections;
+          }
+        }).catch(error => console.error("Error updating user document:", error));
+
+      }
+      else {
+        // Change the icon to filled star
+        this.className = 'lni lni-star-fill';
+
+        // Get the ID of the card by accessing the parent .card div's id
+        const cardId = this.closest('.card').id.split('-')[1];
+        console.log(cardId); // For testing
+
+        const userDocRef = doc(db, 'users', userID);
+
+        // Update the user's document with the card ID
+        getDoc(userDocRef).then(docSnap => {
+          if (docSnap.exists()) {
+            // If the document exists, update or set the collection field
+            let collections = docSnap.data().collections || [];
+            if (!collections.includes(cardId)) {
+              collections.push(cardId);
+              updateDoc(userDocRef, { collections: collections });
+            }
+            collectionList = collections;
+          }
+        }).catch(error => console.error("Error updating user document:", error));
+      }
+    });
+  });
+}
+
+// called once, when the user just login. get the user's collections from the database, and update the collection icon
+function updateCollection() {
+  const userDocRef = doc(db, 'users', userID);
+  getDoc(userDocRef).then(docSnap => {
+    if (docSnap.exists()) {
+      // If the document exists, update or set the collection field
+      collectionList = docSnap.data().collections || [];
+      console.log(collectionList);
+      document.querySelectorAll('.card').forEach(card => {
+        const cardId = card.id.split('-')[1];
+        // console.log(cardId);
+
+        if (collectionList.includes(cardId)) {
+          // console.log(cardId);
+          card.querySelector('.lni-star-empty').className = 'lni lni-star-fill';
+        }
+      });
+    }
+  }).catch(error => console.error("Error updating user document:", error));
+
+  // the initial load of the user's collections papers
+  loadCollectionsPapers(); // load the user's collections papers
+}
+
+// handle the google sign in
 document.getElementById('googleSignInButton').addEventListener('click', () => {
   const provider = new GoogleAuthProvider();
   const auth = getAuth();
@@ -526,32 +1237,19 @@ document.getElementById('googleSignInButton').addEventListener('click', () => {
           // New user: Add to Firestore
           await setDoc(usersRef, { username: user.displayName });
         }
-        else {
-          // get the openai api key
-          const data = docSnap.data();
-          // initialize OpenAI
-          openai = new OpenAI({
-            apiKey: data.apiKey,
-            baseURL: data.baseURL,
-            dangerouslyAllowBrowser: true
-          });
-          console.log(openai);
-          async function main() {
-            const chatCompletion = await openai.chat.completions.create({
-              messages: [{ role: 'user', content: 'Say this is a test' }],
-              model: 'gpt-3.5-turbo',
-            });
-            console.log(chatCompletion);
-          }
-
-          main();
-        }
 
         // Replace the login button with "Hi, [Username]"
         const loginButton = document.getElementById('googleSignInButton');
         loginButton.outerHTML = `<span><i class="lni lni-friendly"></i>Hi, ${user.displayName}</span>`;
         console.log(user.displayName);
         console.log(user.uid);
+        userID = user.uid;
+        loginStatus = true;
+        addCollectionIcon(); // load the 🌟 icons for the collecting
+        addClickToCollectionIcon(); // add click event to the collection icon
+        updateCollection(); // update the user's collections from the database
+        document.querySelector('a[href="#collections"]').style.display = 'block'; //show the collections tab
+
       }
     })
     .catch((error) => {
@@ -563,7 +1261,6 @@ document.getElementById('googleSignInButton').addEventListener('click', () => {
 
 // AI RAG application setup
 
-
 // capture the user input
 document.addEventListener('DOMContentLoaded', function () {
   const chatInput = document.getElementById('chatInput');
@@ -574,16 +1271,55 @@ document.addEventListener('DOMContentLoaded', function () {
     const userQuestion = chatInput.value;
     console.log(userQuestion);
 
-    // 定义请求的 URL 和参数
+    // Insert spinner above chatInput
+    const spinner = document.createElement('div');
+    spinner.className = 'spinner-grow';
+    spinner.setAttribute('role', 'status');
+    spinner.innerHTML = '<span class="visually-hidden">Loading...</span>';
+    document.querySelector('.chat-input-container').insertBefore(spinner, chatInput);
+
+    // firebase cloud function URL
     const url = new URL("https://texverse-ai-qa-lebwgsie4q-uc.a.run.app");
     const params = { text: userQuestion };
     url.search = new URLSearchParams(params).toString();
 
-    // 使用 fetch 发送 GET 请求
+    // use fetch to send the user question to the server
     fetch(url)
-      .then(response => response.text()) // 将响应转换为文本
-      .then(text => console.log(text))   // 打印响应文本
-      .catch(error => console.error('Error:', error)); // 处理可能的错误
+      .then(response => response.text()) // convert the response to text
+      .then(text => {
+        console.log(text);
+
+        const chatOutput = document.getElementById('chatOutput');
+
+        // Create user question bubble
+        let userBubble = document.createElement('div');
+        userBubble.className = 'chat-bubble user';
+        userBubble.innerHTML = `<i class="lni lni-friendly"></i><div class="chat-bubble-text"><strong>You</strong><p>${userQuestion}</p></div>`;
+        chatOutput.appendChild(userBubble);
+
+        // // Convert AI response from Markdown to HTML
+        // let converter = new showdown.Converter();
+        // let aiResponseHtml = converter.makeHtml(text);
+
+        // Create AI response bubble
+        let aiBubble = document.createElement('div');
+        const renderedHtml = converter.makeHtml(text);
+        aiBubble.className = 'chat-bubble ai';
+        aiBubble.innerHTML = `<i class="lni lni-twitch"></i><div class="chat-bubble-text"><strong>TexVerse ChatBot</strong><p>${renderedHtml}</p></div>`;
+        chatOutput.appendChild(aiBubble);
+
+        // Scroll to the bottom of chatOutput
+        chatOutput.scrollTop = chatOutput.scrollHeight;
+
+        // Remove spinner once the response is processed
+        spinner.remove();
+
+      })
+      .catch(error => {
+        console.error('Error:', error);
+        // Remove spinner once the response is processed
+        spinner.remove();
+      });
 
     // Reset the input field
     chatInput.value = '';
@@ -599,5 +1335,5 @@ document.addEventListener('DOMContentLoaded', function () {
 
   // Capture click on the upload button
   uploadButton.addEventListener('click', handleInputSubmission);
-
+  // handleInputSubmission();
 });
