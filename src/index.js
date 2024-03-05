@@ -5,10 +5,7 @@ import { getFirestore, collection, getDoc, getDocs, setDoc, updateDoc, doc, quer
 import { getStorage, ref, getDownloadURL } from "firebase/storage";
 import { getAuth, signInWithPopup, GoogleAuthProvider } from "firebase/auth";
 import * as d3 from "d3";
-import { Pinecone } from '@pinecone-database/pinecone';
-import OpenAI from 'openai';
 import './style.css';
-import marked from 'marked';
 
 import showdown from 'showdown';
 
